@@ -1,78 +1,40 @@
-require('dotenv').config();
 const { Telegraf } = require('telegraf');
+require('dotenv').config();
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const OWNER_ID = Number(process.env.OWNER_ID);
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const OWNER_ID = parseInt(process.env.OWNER_ID);
 
-if (!BOT_TOKEN || !OWNER_ID) {
-  console.error('Error: BOT_TOKEN and OWNER_ID must be set in .env');
-  process.exit(1);
-}
+// Temporary in-memory map: forwardedMessageId => originalUserId
+const messageMap = new Map();
 
-const bot = new Telegraf(BOT_TOKEN);
-
-// Map to track forwarded messages: ownerMessageId -> originalChatId, originalMessageId
-const forwardedMessages = new Map();
-
-// Forward any incoming message to owner and save mapping
+// 1. Forward any message received (not from owner) to owner
 bot.on('message', async (ctx) => {
   try {
-    // Forward message to owner
-    const forwardedMessage = await ctx.forwardMessage(OWNER_ID);
+    const senderId = ctx.chat.id;
 
-    // Save mapping: forwarded msg id -> original chat and msg id
-    forwardedMessages.set(forwardedMessage.message_id, {
-      chatId: ctx.chat.id,
-      messageId: ctx.message.message_id
-    });
+    if (senderId !== OWNER_ID) {
+      const forwarded = await ctx.forwardMessage(OWNER_ID, senderId, ctx.message.message_id);
 
-    console.log(`Forwarded message ${ctx.message.message_id} from chat ${ctx.chat.id} to owner ${OWNER_ID}`);
-  } catch (error) {
-    console.error('Failed to forward message:', error);
-  }
-});
+      // Save map: forwarded_msg_id -> original_user_id
+      messageMap.set(forwarded.message_id, senderId);
+    }
 
-// Owner replying to forwarded messages
-bot.on('message', async (ctx) => {
-  try {
-    if (ctx.chat.id === OWNER_ID && ctx.message.reply_to_message) {
-      const repliedMsgId = ctx.message.reply_to_message.message_id;
+    // 2. If owner replies to a forwarded message, send the reply back to the original user
+    if (senderId === OWNER_ID && ctx.message.reply_to_message) {
+      const repliedToId = ctx.message.reply_to_message.message_id;
+      const originalUserId = messageMap.get(repliedToId);
 
-      // Check if this replied message id exists in the map
-      if (forwardedMessages.has(repliedMsgId)) {
-        const { chatId } = forwardedMessages.get(repliedMsgId);
-
-        // Send owner's reply back to the original chat
-        await bot.telegram.sendMessage(chatId, ctx.message.text);
-        console.log(`Owner replied to message ${repliedMsgId}, sent reply to chat ${chatId}`);
+      if (originalUserId) {
+        const text = ctx.message.text || '[non-text message]';
+        await ctx.telegram.sendMessage(originalUserId, text);
+      } else {
+        await ctx.reply("Could not find the original user.");
       }
     }
-  } catch (error) {
-    console.error('Failed to send owner reply:', error);
+  } catch (err) {
+    console.error("Error:", err.message);
   }
 });
 
-// Welcome new users in groups where bot is admin
-bot.on('new_chat_members', async (ctx) => {
-  try {
-    const newMembers = ctx.message.new_chat_members;
-    for (const member of newMembers) {
-      // Skip if the new member is the bot itself
-      if (member.is_bot) continue;
-
-      await ctx.reply(`Welcome, ${member.first_name}!`);
-      console.log(`Welcomed new member ${member.first_name} in chat ${ctx.chat.id}`);
-    }
-  } catch (error) {
-    console.error('Failed to send welcome message:', error);
-  }
-});
-
-bot.launch().then(() => {
-  console.log('Bot started and running with welcome & reply features...');
-});
-
-// Graceful shutdown
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-          
+bot.launch();
+console.log("Bot is running...");
